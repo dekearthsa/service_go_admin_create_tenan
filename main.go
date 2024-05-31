@@ -2,13 +2,19 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log"
+	"net/http"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/eventbridge"
+	"github.com/aws/aws-sdk-go-v2/service/eventbridge/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -31,6 +37,11 @@ type DBdata struct {
 type Claims struct {
 	Data DBdata `json:"data"`
 	jwt.RegisteredClaims
+}
+
+type Payload struct {
+	TenanName string `json:"tenanName"`
+	BusName   string `json:"busName"`
 }
 
 func getFileFromS3(bucket, key string, region string) (string, error) {
@@ -113,9 +124,10 @@ func CheckTable(tenan string) (bool, string, error) {
 	// Print the table names
 	fmt.Println("Tables:")
 	for _, tableName := range result.TableNames {
-		fmt.Println("tableName => ", *tableName)
-		if tableName == genTenanName {
-			isTeana = tableName
+		// fmt.Println("tableName => ", *tableName)
+		strPointerValue := *tableName
+		if strPointerValue == genTenanName {
+			isTeana = genTenanName
 		}
 	}
 
@@ -127,64 +139,101 @@ func CheckTable(tenan string) (bool, string, error) {
 
 }
 
-func CreateTable(tableName string) (bool, error) {
-
-	sess := session.Must(session.NewSessionWithOptions(session.Options{
-		SharedConfigState: session.SharedConfigEnable,
-	}))
-
-	svc := dynamodb.New(sess)
-
-	input := &dynamodb.CreateTableInput{
-		TableName: aws.String(tableName),
-		AttributeDefinitions: []*dynamodb.AttributeDefinition{
-			{
-				AttributeName: aws.String("CustomerID"),
-				AttributeType: aws.String("S"),
-			},
-			{
-				AttributeName: aws.String("FirstName"),
-				AttributeType: aws.String("S"),
-			},
-			{
-				AttributeName: aws.String("LastName"),
-				AttributeType: aws.String("S"),
-			},
-			{
-				AttributeName: aws.String("CreateDate"),
-				AttributeType: aws.String("N"),
-			},
-			{
-				AttributeName: aws.String("Tenan"),
-				AttributeType: aws.String("S"),
-			},
-		},
-		KeySchema: []*dynamodb.KeySchemaElement{
-			{
-				AttributeName: aws.String("CustomerID"),
-				KeyType:       aws.String("HASH"), // Partition key
-			},
-		},
-		ProvisionedThroughput: &dynamodb.ProvisionedThroughput{
-			ReadCapacityUnits:  aws.Int64(5),
-			WriteCapacityUnits: aws.Int64(5),
-		},
+func EventBusSend(ctx context.Context, tenanName string) (bool, error) {
+	cfg, err := config.LoadDefaultConfig(ctx)
+	if err != nil {
+		log.Fatal(err)
 	}
 
-	_, err := svc.CreateTable(input)
+	svc := eventbridge.NewFromConfig(cfg)
+
+	payload := Payload{
+		TenanName: tenanName,
+		BusName:   "bus-superadmin-create-tenan",
+	}
+
+	detail, err := json.Marshal(payload)
 	if err != nil {
-		fmt.Println("Error creating table:", err)
 		return false, err
 	}
 
-	fmt.Println("Table", tableName, "created successfully!")
+	setInput := &eventbridge.PutEventsInput{
+		Entries: []types.PutEventsRequestEntry{
+			{
+				Time:         aws.Time(time.Now()),
+				Detail:       aws.String(string(detail)),
+				DetailType:   aws.String("Message"),
+				EventBusName: aws.String("arn:aws:events:ap-southeast-1:058264531773:event-bus/bus-superadmin-create-tenan"),
+				Source:       aws.String("lambda publish"),
+				// Resources:    setResources,
+			},
+		},
+	}
 
+	_, err = svc.PutEvents(ctx, setInput)
+	if err != nil {
+		return false, err
+	}
 	return true, nil
 }
 
+// func CreateTable(tableName string) (bool, error) {
+// 	fmt.Println("start create table.")
+// 	sess := session.Must(session.NewSessionWithOptions(session.Options{
+// 		SharedConfigState: session.SharedConfigEnable,
+// 	}))
+
+// 	svc := dynamodb.New(sess)
+
+// 	input := &dynamodb.CreateTableInput{
+// 		TableName: aws.String(tableName),
+// 		AttributeDefinitions: []*dynamodb.AttributeDefinition{
+// 			{
+// 				AttributeName: aws.String("customerID"),
+// 				AttributeType: aws.String("S"), // S for String
+// 			},
+// 		},
+// 		KeySchema: []*dynamodb.KeySchemaElement{
+// 			{
+// 				AttributeName: aws.String("customerID"),
+// 				KeyType:       aws.String("HASH"), // Partition key
+// 			},
+// 		},
+// 		ProvisionedThroughput: &dynamodb.ProvisionedThroughput{
+// 			ReadCapacityUnits:  aws.Int64(5),
+// 			WriteCapacityUnits: aws.Int64(5),
+// 		},
+// 	}
+
+// 	_, err := svc.CreateTable(input)
+// 	if err != nil {
+// 		fmt.Println("Error creating table:", err)
+// 		return false, err
+// 	}
+
+// 	fmt.Println("Table", tableName, "created successfully!")
+
+// 	return true, nil
+// }
+
 func handler(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+	// fmt.Println("req", req)
+	// if req.HTTPMethod != http.MethodPost {
+	// 	return events.APIGatewayProxyResponse{
+	// 		StatusCode: http.StatusMethodNotAllowed,
+	// 		Body:       "Method Not Allowed",
+	// 	}, nil
+	// }
 	var token = req.Headers["authorization"]
-	var data Request = req.Body
+	var data Request
+	err := json.Unmarshal([]byte(req.Body), &data)
+	if err != nil {
+		return events.APIGatewayProxyResponse{
+			StatusCode: http.StatusBadRequest,
+			Body:       fmt.Sprintf("Error parsing request body: %v", err),
+		}, err
+	}
+
 	status, _, userType, err := ValidateToken(token)
 	if err != nil {
 		fmt.Println("err validate token => ", err)
@@ -216,17 +265,19 @@ func handler(ctx context.Context, req events.APIGatewayProxyRequest) (events.API
 		}, nil
 	}
 
-	createTableStatus, err := CreateTable(tableName)
+	busStatus, err := EventBusSend(ctx, tableName)
+
+	// createTableStatus, err := CreateTable(tableName)
 	if err != nil {
 		return events.APIGatewayProxyResponse{
 			StatusCode: 500,
-			Body:       "Create table fail",
+			Body:       "Send bus fail",
 		}, nil
 	}
-	if createTableStatus != true {
+	if busStatus != true {
 		return events.APIGatewayProxyResponse{
 			StatusCode: 500,
-			Body:       "Create table fail",
+			Body:       "Send bus fail",
 		}, nil
 	}
 

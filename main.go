@@ -94,7 +94,7 @@ func ValidateToken(tokens string) (int, string, string, error) {
 	return 200, claims.Data.Tenan, claims.Data.Type, nil
 }
 
-func CheckTable(tenan string) (bool, error) {
+func CheckTable(tenan string) (bool, string, error) {
 	// fmt.Println("tenan => ", tenan)
 	var isTeana string
 	var genTenanName string = tenan + "_" + "demo_customer"
@@ -107,7 +107,7 @@ func CheckTable(tenan string) (bool, error) {
 	result, err := svc.ListTables(input)
 	if err != nil {
 		fmt.Println("Error listing tables:", err)
-		return false, err
+		return false, "", err
 	}
 
 	// Print the table names
@@ -120,11 +120,66 @@ func CheckTable(tenan string) (bool, error) {
 	}
 
 	if isTeana == genTenanName {
-		return false, nil
+		return false, "", nil
 	}
 
-	return true, nil
+	return true, genTenanName, nil
 
+}
+
+func CreateTable(tableName string) (bool, error) {
+
+	sess := session.Must(session.NewSessionWithOptions(session.Options{
+		SharedConfigState: session.SharedConfigEnable,
+	}))
+
+	svc := dynamodb.New(sess)
+
+	input := &dynamodb.CreateTableInput{
+		TableName: aws.String(tableName),
+		AttributeDefinitions: []*dynamodb.AttributeDefinition{
+			{
+				AttributeName: aws.String("CustomerID"),
+				AttributeType: aws.String("S"),
+			},
+			{
+				AttributeName: aws.String("FirstName"),
+				AttributeType: aws.String("S"),
+			},
+			{
+				AttributeName: aws.String("LastName"),
+				AttributeType: aws.String("S"),
+			},
+			{
+				AttributeName: aws.String("CreateDate"),
+				AttributeType: aws.String("N"),
+			},
+			{
+				AttributeName: aws.String("Tenan"),
+				AttributeType: aws.String("S"),
+			},
+		},
+		KeySchema: []*dynamodb.KeySchemaElement{
+			{
+				AttributeName: aws.String("CustomerID"),
+				KeyType:       aws.String("HASH"), // Partition key
+			},
+		},
+		ProvisionedThroughput: &dynamodb.ProvisionedThroughput{
+			ReadCapacityUnits:  aws.Int64(5),
+			WriteCapacityUnits: aws.Int64(5),
+		},
+	}
+
+	_, err := svc.CreateTable(input)
+	if err != nil {
+		fmt.Println("Error creating table:", err)
+		return false, err
+	}
+
+	fmt.Println("Table", tableName, "created successfully!")
+
+	return true, nil
 }
 
 func handler(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
@@ -146,7 +201,7 @@ func handler(ctx context.Context, req events.APIGatewayProxyRequest) (events.API
 		}, nil
 	}
 
-	tableStatus, err := CheckTable(data.TenanName)
+	tableStatus, tableName, err := CheckTable(data.TenanName)
 	if err != nil {
 		fmt.Println(err)
 		return events.APIGatewayProxyResponse{
@@ -158,6 +213,20 @@ func handler(ctx context.Context, req events.APIGatewayProxyRequest) (events.API
 		return events.APIGatewayProxyResponse{
 			StatusCode: 200,
 			Body:       "this tenan alreadly exists.",
+		}, nil
+	}
+
+	createTableStatus, err := CreateTable(tableName)
+	if err != nil {
+		return events.APIGatewayProxyResponse{
+			StatusCode: 500,
+			Body:       "Create table fail",
+		}, nil
+	}
+	if createTableStatus != true {
+		return events.APIGatewayProxyResponse{
+			StatusCode: 500,
+			Body:       "Create table fail",
 		}, nil
 	}
 
